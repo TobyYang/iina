@@ -8,14 +8,20 @@
 
 import Cocoa
 
+fileprivate extension QuickSettingViewController.TabViewType {
+  init(buttonTag: Int) {
+    self = [.video, .audio, .sub][at: buttonTag] ?? .video
+  }
+}
+
 class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, SidebarViewController {
 
   override var nibName: NSNib.Name {
     return NSNib.Name("QuickSettingViewController")
   }
-  
+
   let sliderSteps = 24.0
-  
+
   /**
    Similiar to the one in `PlaylistViewController`.
    Since IBOutlet is `nil` when the view is not loaded at first time,
@@ -46,7 +52,7 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
   @IBOutlet weak var tabView: NSTabView!
 
   @IBOutlet weak var buttonTopConstraint: NSLayoutConstraint!
-  
+
   @IBOutlet weak var videoTableView: NSTableView!
   @IBOutlet weak var audioTableView: NSTableView!
   @IBOutlet weak var subTableView: NSTableView!
@@ -75,14 +81,14 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
   @IBOutlet weak var audioDelaySliderIndicator: NSTextField!
   @IBOutlet weak var audioDelaySliderConstraint: NSLayoutConstraint!
   @IBOutlet weak var customAudioDelayTextField: NSTextField!
-  
-  
+
+
   @IBOutlet weak var subLoadSementedControl: NSSegmentedControl!
   @IBOutlet weak var subDelaySlider: NSSlider!
   @IBOutlet weak var subDelaySliderIndicator: NSTextField!
   @IBOutlet weak var subDelaySliderConstraint: NSLayoutConstraint!
   @IBOutlet weak var customSubDelayTextField: NSTextField!
-  
+
   @IBOutlet weak var audioEqSlider1: NSSlider!
   @IBOutlet weak var audioEqSlider2: NSSlider!
   @IBOutlet weak var audioEqSlider3: NSSlider!
@@ -118,6 +124,12 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
       view.dataSource = self
       view.superview?.superview?.layer?.cornerRadius = 4
     }
+
+    // colors
+    if #available(macOS 10.14, *) {
+      withAllTableViews { tableView, _ in tableView.backgroundColor = NSColor(named: .sidebarTableBackground)! }
+    }
+
     if pendingSwitchRequest != nil {
       switchToTab(pendingSwitchRequest!)
       pendingSwitchRequest = nil
@@ -125,16 +137,20 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
 
     subLoadSementedControl.image(forSegment: 1)?.isTemplate = true
 
+    func observe(_ name: Notification.Name, block: @escaping (Notification) -> Void) {
+      observers.append(NotificationCenter.default.addObserver(forName: name, object: player, queue: .main, using: block))
+    }
+
     // notifications
-    let tracklistChangeObserver = NotificationCenter.default.addObserver(forName: Constants.Noti.tracklistChanged, object: nil, queue: OperationQueue.main) { _ in
-      self.player.getTrackInfo()
-      self.withAllTableViews { tableView, _ in tableView.reloadData() }
+    observe(.iinaTracklistChanged) { _ in
+      self.withAllTableViews { view, _ in view.reloadData() }
     }
-    observers.append(tracklistChangeObserver)
-    let afChangeObserver = NotificationCenter.default.addObserver(forName: Constants.Noti.afChanged, object: nil, queue: OperationQueue.main) { _ in
-      self.updateAudioEqState()
+    observe(.iinaVIDChanged) { _ in self.videoTableView.reloadData() }
+    observe(.iinaAIDChanged) { _ in self.audioTableView.reloadData() }
+    observe(.iinaSIDChanged) { _ in
+      self.subTableView.reloadData()
+      self.secSubTableView.reloadData()
     }
-    observers.append(afChangeObserver)
   }
 
   // MARK: - Validate UI
@@ -153,7 +169,14 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
   }
 
   private func updateControlsState() {
-    // Video
+    updateVideoTabControl()
+    updateAudioTabControl()
+    updateSubTabControl()
+    updateVideoEqState()
+    updateAudioEqState()
+  }
+
+  private func updateVideoTabControl() {
     if let index = AppData.aspectsInPanel.index(of: player.info.unsureAspect) {
       aspectSegment.selectedSegment = index
     } else {
@@ -171,14 +194,16 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
     let sliderValue = log(speed / AppData.minSpeed) / log(AppData.maxSpeed / AppData.minSpeed) * sliderSteps
     speedSlider.doubleValue = sliderValue
     redraw(indicator: speedSliderIndicator, constraint: speedSliderConstraint, slider: speedSlider, value: "\(customSpeedTextField.stringValue)x")
+  }
 
-    // Audio
+  private func updateAudioTabControl() {
     let audioDelay = player.mpv.getDouble(MPVOption.Audio.audioDelay)
     audioDelaySlider.doubleValue = audioDelay
     customAudioDelayTextField.doubleValue = audioDelay
     redraw(indicator: audioDelaySliderIndicator, constraint: audioDelaySliderConstraint, slider: audioDelaySlider, value: "\(customAudioDelayTextField.stringValue)s")
+  }
 
-    // Sub
+  private func updateSubTabControl() {
     if let currSub = player.info.currentTrack(.sub) {
       subScaleSlider.isEnabled = !currSub.isImageSub
       // FIXME: CollorWells cannot be disable?
@@ -186,7 +211,7 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
       [subTextColorWell, subTextSizePopUp, subTextBgColorWell, subTextBorderColorWell, subTextBorderWidthPopUp, subTextFontBtn].forEach { $0.isEnabled = enableTextSettings }
     }
 
-    let currSubScale = player.mpv.getDouble(MPVOption.Subtitles.subScale).constrain(min: 0.1, max: 10)
+    let currSubScale = player.mpv.getDouble(MPVOption.Subtitles.subScale).clamped(to: 0.1...10)
     let displaySubScale = Utility.toDisplaySubScale(fromRealSubScale: currSubScale)
     subScaleSlider.doubleValue = displaySubScale + (displaySubScale > 0 ? -1 : 1)
     let subDelay = player.mpv.getDouble(MPVOption.Subtitles.subDelay)
@@ -198,7 +223,7 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
     subPosSlider.intValue = Int32(currSubPos)
 
     let fontSize = player.mpv.getInt(MPVOption.Subtitles.subFontSize)
-    subTextSizePopUp.selectItem(withTitle: fontSize.toStr())
+    subTextSizePopUp.selectItem(withTitle: fontSize.description)
 
     let borderWidth = player.mpv.getDouble(MPVOption.Subtitles.subBorderSize)
     subTextBorderWidthPopUp.selectItem(at: -1)
@@ -207,10 +232,6 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
         subTextBorderWidthPopUp.select(item)
       }
     }
-
-    // Equalizer
-    updateVideoEqState()
-    updateAudioEqState()
   }
 
   private func updateVideoEqState() {
@@ -222,29 +243,34 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
   }
 
   private func updateAudioEqState() {
-    if let filter = player.info.audioEqFilter {
+    if let filters = player.info.audioEqFilters {
       withAllAudioEqSliders { slider in
-        slider.doubleValue = Double( filter.params!["e\(slider.tag)"] ?? "" ) ?? 0
+        if let gain = filters[slider.tag]?.stringFormat.dropLast().split(separator: "=").last {
+          slider.doubleValue = Double(gain) ?? 0
+        } else {
+          slider.doubleValue = 0
+        }
       }
     } else {
       withAllAudioEqSliders { $0.doubleValue = 0 }
     }
   }
 
-  func reloadVideoData() {
+  func reload() {
     guard isViewLoaded else { return }
-    videoTableView.reloadData()
-  }
-
-  func reloadAudioData() {
-    guard isViewLoaded else { return }
-    audioTableView.reloadData()
-  }
-
-  func reloadSubtitleData() {
-    guard isViewLoaded else { return }
-    subTableView.reloadData()
-    secSubTableView.reloadData()
+    if currentTab == .audio {
+      audioTableView.reloadData()
+      updateAudioTabControl()
+      updateAudioEqState()
+    } else if currentTab == .video {
+      videoTableView.reloadData()
+      updateVideoTabControl()
+      updateVideoEqState()
+    } else if currentTab == .sub {
+      subTableView.reloadData()
+      secSubTableView.reloadData()
+      updateSubTabControl()
+    }
   }
 
   // MARK: - Switch tab
@@ -262,33 +288,17 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
   /** Switch tab (for internal call) */
   private func switchToTab(_ tab: TabViewType) {
     let button: NSButton
-    let tabIndex: Int
     switch tab {
     case .video:
       button = videoTabBtn
-      tabIndex = 0
     case .audio:
       button = audioTabBtn
-      tabIndex = 1
     case .sub:
       button = subTabBtn
-      tabIndex = 2
     default:
       return
     }
-    tabView.selectTabViewItem(at: tabIndex)
-    // cancel current active button
-    for btn in [videoTabBtn, audioTabBtn, subTabBtn] {
-      if let btn = btn {
-        let title = btn.title
-        btn.attributedTitle = NSAttributedString(string: title, attributes: Utility.tabTitleFontAttributes)
-      }
-    }
-    // the active one
-    let title = button.title
-    button.attributedTitle = NSAttributedString(string: title, attributes: Utility.tabTitleActiveFontAttributes)
-
-    currentTab = tab
+    tabBtnAction(button)
   }
 
   // MARK: - NSTableView delegate
@@ -312,16 +322,16 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
     let activeId: Int
     let columnName = tableColumn?.identifier
     if tableView == videoTableView {
-      track = row == 0 ? nil : player.info.videoTracks[row-1]
+      track = row == 0 ? nil : player.info.videoTracks[at: row-1]
       activeId = player.info.vid!
     } else if tableView == audioTableView {
-      track = row == 0 ? nil : player.info.audioTracks[row-1]
+      track = row == 0 ? nil : player.info.audioTracks[at: row-1]
       activeId = player.info.aid!
     } else if tableView == subTableView {
-      track = row == 0 ? nil : player.info.subTracks[row-1]
+      track = row == 0 ? nil : player.info.subTracks[at: row-1]
       activeId = player.info.sid!
     } else if tableView == secSubTableView {
-      track = row == 0 ? nil : player.info.subTracks[row-1]
+      track = row == 0 ? nil : player.info.subTracks[at: row-1]
       activeId = player.info.secondSid!
     } else {
       return nil
@@ -345,7 +355,6 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
         let subId = view.selectedRow > 0 ? player.info.trackList(type)[view.selectedRow-1].id : 0
         self.player.setTrack(subId, forType: type)
         view.deselectAll(self)
-        view.reloadData()
       }
     }
     // Revalidate layout and controls
@@ -372,17 +381,9 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
 
   @IBAction func tabBtnAction(_ sender: NSButton) {
     tabView.selectTabViewItem(at: sender.tag)
-    // cancel current active button
-    [videoTabBtn, audioTabBtn, subTabBtn].forEach { btn in
-      if let btn = btn {
-        let title = btn.title
-        btn.attributedTitle = NSAttributedString(string: title, attributes: Utility.tabTitleFontAttributes)
-      }
-    }
-    // the active one
-    let title = sender.title
-    sender.attributedTitle = NSAttributedString(string: title, attributes: Utility.tabTitleActiveFontAttributes)
-    updateControlsState()
+    [videoTabBtn, audioTabBtn, subTabBtn].forEach { Utility.setBoldTitle(for: $0, $0 == sender) }
+    currentTab = .init(buttonTag: sender.tag)
+    reload()
   }
 
   // MARK: Video tab
@@ -390,19 +391,19 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
   @IBAction func aspectChangedAction(_ sender: NSSegmentedControl) {
     let aspect = AppData.aspectsInPanel[sender.selectedSegment]
     player.setVideoAspect(aspect)
-    mainWindow.displayOSD(.aspect(aspect))
+    player.sendOSD(.aspect(aspect))
   }
 
   @IBAction func cropChangedAction(_ sender: NSSegmentedControl) {
     let cropStr = AppData.cropsInPanel[sender.selectedSegment]
     player.setCrop(fromString: cropStr)
-    mainWindow.displayOSD(.crop(cropStr))
+    player.sendOSD(.crop(cropStr))
   }
 
   @IBAction func rotationChangedAction(_ sender: NSSegmentedControl) {
     let value = AppData.rotations[sender.selectedSegment]
     player.setVideoRotate(value)
-    mainWindow.displayOSD(.rotate(value))
+    player.sendOSD(.rotate(value))
   }
 
   @IBAction func customAspectEditFinishedAction(_ sender: AnyObject?) {
@@ -410,7 +411,7 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
     if value != "" {
       aspectSegment.setSelected(false, forSegment: aspectSegment.selectedSegment)
       player.setVideoAspect(value)
-      mainWindow.displayOSD(.aspect(value))
+      player.sendOSD(.aspect(value))
     }
   }
 
@@ -516,7 +517,7 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
 
   @IBAction func loadExternalAudioAction(_ sender: NSButton) {
     let currentDir = player.info.currentURL?.deletingLastPathComponent()
-    Utility.quickOpenPanel(title: "Load external audio file", isDir: false, dir: currentDir) { url in
+    Utility.quickOpenPanel(title: "Load external audio file", chooseDir: false, dir: currentDir) { url in
       self.player.loadExternalAudioFile(url)
       self.audioTableView.reloadData()
     }
@@ -551,24 +552,23 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
   }
 
   @IBAction func audioEqSliderAction(_ sender: NSSlider) {
-    let params: [String: String] = [
-      "e0": audioEqSlider1.stringValue,
-      "e1": audioEqSlider2.stringValue,
-      "e2": audioEqSlider3.stringValue,
-      "e3": audioEqSlider4.stringValue,
-      "e4": audioEqSlider5.stringValue,
-      "e5": audioEqSlider6.stringValue,
-      "e6": audioEqSlider7.stringValue,
-      "e7": audioEqSlider8.stringValue,
-      "e8": audioEqSlider9.stringValue,
-      "e9": audioEqSlider10.stringValue,
-    ]
-    let filter = MPVFilter(name: "equalizer", label: nil, params: params)
-    player.setAudioEq(fromFilter: filter)
+    player.setAudioEq(fromGains: [
+      audioEqSlider1.doubleValue,
+      audioEqSlider2.doubleValue,
+      audioEqSlider3.doubleValue,
+      audioEqSlider4.doubleValue,
+      audioEqSlider5.doubleValue,
+      audioEqSlider6.doubleValue,
+      audioEqSlider7.doubleValue,
+      audioEqSlider8.doubleValue,
+      audioEqSlider9.doubleValue,
+      audioEqSlider10.doubleValue,
+      ])
   }
 
   @IBAction func resetAudioEqAction(_ sender: AnyObject) {
     player.removeAudioEqFilter()
+    updateAudioEqState()
   }
 
 
@@ -577,41 +577,74 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
   @IBAction func loadExternalSubAction(_ sender: NSSegmentedControl) {
     if sender.selectedSegment == 0 {
       let currentDir = player.info.currentURL?.deletingLastPathComponent()
-      Utility.quickOpenPanel(title: "Load external subtitle", isDir: false, dir: currentDir) { url in
-        self.player.loadExternalSubFile(url)
+      Utility.quickOpenPanel(title: "Load external subtitle", chooseDir: false, dir: currentDir) { url in
+        // set a delay
+        self.player.loadExternalSubFile(url, delay: true)
         self.subTableView.reloadData()
         self.secSubTableView.reloadData()
       }
     } else if sender.selectedSegment == 1 {
-      let activeSubs = player.info.trackList(.sub) + player.info.trackList(.secondSub)
-      let menu = NSMenu()
-      menu.autoenablesItems = false
-      if player.info.currentSubsInfo.isEmpty {
-        menu.addItem(withTitle: NSLocalizedString("track.none", comment: "<None>"))
-      } else {
-        if let videoInfo = player.info.currentVideosInfo.first(where: { $0.url == player.info.currentURL }),
-          !videoInfo.relatedSubs.isEmpty {
-          videoInfo.relatedSubs.forEach { sub in
-            let isActive = activeSubs.contains { $0.externalFilename == sub.path }
-            menu.addItem(withTitle: "\(sub.filename).\(sub.ext)", action: #selector(self.chosenSubFromMenu(_:)), tag: nil, obj: sub, stateOn: isActive)
-          }
-          menu.addItem(NSMenuItem.separator())
-        }
-        player.info.currentSubsInfo.sorted { (f1, f2) in
-          return f1.filename.localizedStandardCompare(f2.filename) == .orderedAscending
-        }.forEach { sub in
-          let isActive = activeSubs.contains { $0.externalFilename == sub.path }
-          menu.addItem(withTitle: "\(sub.filename).\(sub.ext)", action: #selector(self.chosenSubFromMenu(_:)), tag: nil, obj: sub, stateOn: isActive)
-        }
-      }
-      NSMenu.popUpContextMenu(menu, with: NSApp.currentEvent!, for: sender)
+      showSubChooseMenu(forView: sender)
     }
   }
 
-  @objc
-  private func chosenSubFromMenu(_ sender: NSMenuItem) {
-    guard let fileInfo = sender.representedObject as? FileInfo else { return }
-    player.loadExternalSubFile(fileInfo.url)
+  func showSubChooseMenu(forView view: NSView, showLoadedSubs: Bool = false) {
+    let activeSubs = player.info.trackList(.sub) + player.info.trackList(.secondSub)
+    let menu = NSMenu()
+    menu.autoenablesItems = false
+    // loaded subtitles
+    if showLoadedSubs {
+      if player.info.subTracks.isEmpty {
+        menu.addItem(withTitle: NSLocalizedString("subtrack.no_loaded", comment: "No subtitles loaded"), enabled: false)
+      } else {
+        menu.addItem(withTitle: NSLocalizedString("track.none", comment: "<None>"),
+                     action: #selector(self.chosenSubFromMenu(_:)), target: self,
+                     stateOn: player.info.sid == 0 ? true : false)
+
+        for sub in player.info.subTracks {
+          menu.addItem(withTitle: sub.readableTitle,
+                       action: #selector(self.chosenSubFromMenu(_:)),
+                       target: self,
+                       obj: sub,
+                       stateOn: sub.id == player.info.sid ? true : false)
+        }
+      }
+      menu.addItem(NSMenuItem.separator())
+    }
+    // external subtitles
+    let addMenuItem = { (sub: FileInfo) -> Void in
+      let isActive = !showLoadedSubs && activeSubs.contains { $0.externalFilename == sub.path }
+      menu.addItem(withTitle: "\(sub.filename).\(sub.ext)",
+                   action: #selector(self.chosenSubFromMenu(_:)),
+                   target: self,
+                   obj: sub,
+                   stateOn: isActive ? true : false)
+
+    }
+    if player.info.currentSubsInfo.isEmpty {
+      menu.addItem(withTitle: NSLocalizedString("subtrack.no_external", comment: "No external subtitles found"),
+                   enabled: false)
+    } else {
+      if let videoInfo = player.info.currentVideosInfo.first(where: { $0.url == player.info.currentURL }),
+        !videoInfo.relatedSubs.isEmpty {
+        videoInfo.relatedSubs.forEach(addMenuItem)
+        menu.addItem(NSMenuItem.separator())
+      }
+      player.info.currentSubsInfo.sorted { (f1, f2) in
+        return f1.filename.localizedStandardCompare(f2.filename) == .orderedAscending
+      }.forEach(addMenuItem)
+    }
+    NSMenu.popUpContextMenu(menu, with: NSApp.currentEvent!, for: view)
+  }
+
+  @objc func chosenSubFromMenu(_ sender: NSMenuItem) {
+    if let fileInfo = sender.representedObject as? FileInfo {
+      player.loadExternalSubFile(fileInfo.url)
+    } else if let sub = sender.representedObject as? MPVTrack {
+      player.setTrack(sub.id, forType: .sub)
+    } else {
+      player.setTrack(0, forType: .sub)
+    }
   }
 
   @IBAction func searchOnlineAction(_ sender: AnyObject) {
@@ -701,5 +734,11 @@ class QuickSettingViewController: NSViewController, NSTableViewDataSource, NSTab
     }
   }
 
+
+}
+
+class QuickSettingView: NSView {
+
+  override func mouseDown(with event: NSEvent) {}
 
 }
